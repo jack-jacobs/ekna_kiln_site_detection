@@ -16,6 +16,7 @@ Development zones comprise **16.6%** of the total area of the analyzed GMAs.
 
 ## Methods
 
+- Our analysis follows the methods and detection parameters originally reported by Verhegghen et al. [here](https://doi.org/10.1016/j.jag.2023.103524).
 - See [exploring_inferences.qmd](test_2024/exploring_inferences.qmd) for calculation of the values above.
   - The raw results geometries were too large to attach. Use `test_2024/inferences_dedup.rds` instead of constructing the inferences dataset with this notebook's procedure.
 - See [image_crosswalk.csv](subimage_selection/image_crosswalk.csv) for catalog of full-resolution images used, accessible through [Maxar G-EGD](https://evwhs.digitalglobe.com/myDigitalGlobe/login).
