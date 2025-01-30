@@ -1,0 +1,325 @@
+---
+title: "Exploring inferences made by V-MS model"
+author: "Jack Jacobs"
+date: "2024-12-17"
+output: html_document
+engine:
+  r:
+    path: /home3/jackjaco/miniconda3/envs/kiln_r/bin/R
+---
+
+```{r}
+library(tidyverse)
+library(glue)
+library(sf)
+library(terra)
+library(tidyterra)
+library(ggmap)
+library(ggspatial)
+```
+
+# Plotting first big run, priority inferences
+
+```{r}
+# Looking at all the priority inferences made
+inferences <- map(
+  c("p1","p2","p3","p4","p5",
+    "n1","n2","n3","n4","n5","n6","n7","n8","n9","n10",
+    "n11","n12","n13","n14","n15","n16"),
+  \(x) st_read(glue("../first_run_output/{x}/rgb_inf_cohort")) |>
+    arrange(desc(proba)) |>
+    slice_head(prop = 0.2) |>
+    st_transform(4326)
+) |> 
+  bind_rows() |> 
+  filter(st_is_valid(geometry))
+
+# GMAs
+gmas <- st_read("../aoi/real_aoi.geojson") |> st_transform(4326)
+
+# Looking at all the footprints that should've been analyzed
+footprints <- map(
+  c("p1","p2","p3","p4","p5",
+    "n1","n2","n3","n4","n5","n6","n7","n8","n9","n10",
+    "n11","n12","n13","n14","n15","n16"),
+  \(x) st_read(glue("../inputs/{x}/footprints")) |> 
+    st_transform(4326)
+) |> 
+  bind_rows()
+
+# Priority zones
+priority <- st_read("../aoi/All GMA DevZone") |> 
+  st_transform(4326) |>
+
+# Filter priority zones to within GMAs
+priority_intersection <- st_intersects(priority, gmas, sparse=F) |> 
+  as_tibble() |> pull(V1)
+priority <- priority |> 
+  filter(priority_intersection) |> 
+  st_intersection(gmas) |> 
+  st_make_valid()
+```
+
+```{r}
+# Small versions of the inferences
+small_inf <- inferences |> 
+  arrange(desc(proba)) |> 
+  slice_head(prop = 0.001)
+
+# Dots!
+bigger_dots <- inferences |> 
+  arrange(desc(proba)) |> 
+  slice_head(prop = 0.1) |> 
+  st_centroid() |> 
+  st_intersection(gmas)
+small_dots <- small_inf |> 
+  st_centroid() |> 
+  st_intersection(gmas)
+```
+
+#### Dealing with overlaps
+
+```{r}
+# Find index pairs within 100 m of each other
+prox <- st_is_within_distance(inferences, dist = 25, sparse = TRUE)
+
+# Create a container list for the overlaps to land
+overlaps <- vector("list", length(prox))
+
+# Loop through the inferences and check for intersections among nearbys
+for (i in seq_along(inferences$geometry)) {
+  # Save all nearbys that aren't itself to int vector
+  nearbys <- prox[[i]][prox[[i]] != i]
+  
+  # Only check for overlap where the vector length > 0
+  if (length(nearbys) > 0) {
+    # Look for intersections
+    filter_vec <- st_intersects(
+      inferences |> slice(i),
+      inferences |> slice(nearbys),
+      sparse = FALSE
+    )[1, ]
+    
+    # Filter prox by the actual intersections
+    intersections <- nearbys[filter_vec]
+    
+    # Append vector to overlaps list
+    overlaps[[i]] <- intersections
+  } else {
+    # No overlaps
+    overlaps[[i]] <- integer(0)
+  }
+}
+
+# Record which indices have overlaps with a higher index than themselves
+rmv <- integer()
+for (i in seq_along(overlaps)) {
+  if (length(overlaps[[i]]) > 0) {
+    if (i > overlaps[[i]][1]) {
+      rmv <- c(rmv, i)
+    }
+  }
+}
+
+# Remove duplicates from inferences
+inferences <- inferences |> 
+  slice(-rmv) %>%
+  filter(lengths(st_within(., gmas)) >= 1)
+
+# Save inferences
+inferences |> 
+  write_rds("inferences_dedup.rds", "gz")
+
+# Rerun the small versions
+small_inf <- inferences |> 
+  arrange(desc(proba)) |> 
+  slice_head(prop = 0.001)
+# Dots!
+# bigger_dots <- inferences |> 
+#   arrange(desc(proba)) |> 
+#   slice_head(prop = 0.1) |> 
+#   st_centroid()
+small_dots <- small_inf |> 
+  st_centroid()
+dots_100 <- inferences |> 
+  arrange(desc(proba)) |> 
+  slice(1:100) |> 
+  st_centroid()
+dots_250 <- inferences |> 
+  arrange(desc(proba)) |> 
+  slice(1:250) |> 
+  st_centroid()
+```
+
+### Testing out maps
+
+```{r}
+ggplot() +
+  geom_sf(data = gmas, fill = "white", color = "black") +
+  geom_sf(data = priority, fill = "lightblue", color = NA) +
+  geom_sf(data = footprints, fill = "red", color = NA, alpha = 0.5) +
+  # geom_sf(data = small_dots, color = "black", size = 0.01) +
+  labs(title = "Footprint of areas checked")
+
+ggsave("footprint.jpg")
+```
+
+```{r}
+ggplot() +
+  annotation_map_tile(zoomin = 0) +
+  geom_sf(data = gmas, fill = NA, color = "black") +
+  geom_sf(data = priority, fill = "blue", color = NA, alpha = 0.25) +
+  geom_sf(data = dots_100, color = "red", size = 0.01) +
+  labs(
+    title = "Estimated kiln sites in Kafue NP vicinity",
+    subtitle = glue("Top 100 kiln site estimates by estimated probability\n",
+                    "Blue regions are designated development zones"),
+    x = "Longitude (degrees)", y = "Latitude (degrees)",
+    caption = "Basemap: OpenStreetMap"
+  ) +
+  annotation_scale(location="tl")
+
+ggsave("result1.jpg", width = 6, height = 6, unit = "in")
+```
+
+```{r}
+inferences |> 
+  arrange(desc(proba)) |> 
+  slice_head(prop = 0.0001) |> 
+  st_centroid() |> 
+  ggplot() +
+  geom_sf(size = 0.01)
+```
+
+## Tables
+
+```{r}
+separate_gmas <- st_read("../../geo_data/KafueNP_GMAs") |> 
+  filter(ID %in% c(2, 4, 8)) |> 
+  st_transform(4326)
+
+# Lunga, Mumbwa, Kasonso
+kilns_per_gma <- dots_100 |> 
+  st_within(separate_gmas, sparse=F) |> 
+  colSums()
+
+# In, out
+kilns_in_priority <- dots_100 |> 
+  st_within(priority, sparse = F) |> 
+  sum()
+
+# Area proportion
+sum(st_area(priority)) / sum(st_area(separate_gmas))
+```
+
+## Trying to look into the tiles
+
+```{r}
+top10 <- inferences |> 
+  arrange(desc(proba)) |> 
+  slice_head(n = 10)
+
+intersections <- top10 |> 
+  st_intersects(footprints) |> 
+  discard(\(x) length(x) == 0) |> 
+  list_c()
+
+top10_footprints <- footprints |> 
+  slice(intersections)
+```
+
+# Plot the inferences
+
+```{r}
+# Load in data
+image <- rast("../imagery/test_image/test_R4C2.tif")
+inferences <- st_read("../outputs/test_iter/rgb")
+```
+
+```{r}
+# Convert the TIFF to a dataframe for ggplot
+image_df <- image |> 
+  # terra::aggregate(fact = 10, fun = mean) |> 
+  terra::as.data.frame(xy = TRUE)
+```
+
+```{r}
+# Plot using ggplot
+huge <- ggplot() +
+  geom_raster(data = image_df, show.legend = FALSE, aes(
+    x = x, y = y,
+    fill = rgb(test_R4C2_1, test_R4C2_2, test_R4C2_3, maxColorValue = 255)
+  )) +
+  scale_fill_identity() +
+  geom_sf(data = inferences, color = "red", fill = NA, size = 1) +
+  coord_sf(crs = sf::st_crs(inferences)) +
+  theme_void()
+
+ggsave(
+  "huge_test.png", limitsize = FALSE,
+  width = 16384, height = 16384, unit = "px"
+)
+```
+
+```{r}
+# Loop a version of this for the set of smaller TIFFs
+for (path in list.files("../inputs/Tiled/RGB")) {
+  # Import image
+  img <- rast(glue("../inputs/Tiled/RGB/{path}"))
+  img_df <- img |> 
+    terra::as.data.frame(xy = TRUE) |> 
+    rename_with(\(x) str_replace(x, "^test_.+_1$", "redd")) |> 
+    rename_with(\(x) str_replace(x, "^test_.+_2$", "greenn")) |> 
+    rename_with(\(x) str_replace(x, "^test_.+_3$", "bluee"))
+  
+  # Save string stub
+  stub <- str_split_i(path, "\\.", 1)
+  
+  # Obtain raster extent as sf object
+  ext <- st_bbox(
+    c(xmin = min(img_df$x), xmax = max(img_df$x),
+      ymax = max(img_df$y), ymin = min(img_df$y)),
+    crs = st_crs(inferences)
+  ) |> 
+    st_as_sfc()
+  
+  # Limit extent of annotations
+  inf <- inferences |> 
+    # filter(proba >= quantile(proba, probs = 0.9)) |> 
+    st_intersection(ext)
+  
+  # Build a ggplot
+  small <- ggplot() +
+    geom_raster(data = img_df, show.legend = FALSE, aes(
+      x = x, y = y,
+      fill = rgb(redd, greenn, bluee, maxColorValue = 255)
+    )) +
+    scale_fill_identity() +
+    geom_sf(data = inf, aes(color = proba), fill = NA, size = 1, alpha = 1/3) +
+    scale_color_viridis_c("Score", option = "C", limits = c(0.5, 1)) +
+    coord_sf(crs = sf::st_crs(inf)) +
+    theme_void() +
+    annotation_scale(
+      location = "bl",
+      pad_x = unit(0.75, "cm"), pad_y = unit(0.75, "cm")
+    )
+  
+  # Save the plot
+  ggsave(
+    glue("small_plots/{stub}.jpg"), plot = small,
+    width = 12, height = 10, unit = "cm"
+  )
+}
+```
+
+```{r}
+# Just plotting the inferences
+ggplot() +
+  geom_sf(
+    data = inferences |> 
+      filter(proba >= quantile(proba, probs = 0.9)),
+    color = "red", fill = NA, size = 1
+  ) +
+  coord_sf(crs = sf::st_crs(inferences))
+```
+
